@@ -1,0 +1,464 @@
+-- create view "angel" (all companies in angel round)
+
+CREATE VIEW angel
+ AS
+ SELECT funding_rounds.id,
+    funding_rounds.funding_round_id,
+    funding_rounds.object_id,
+    funding_rounds.funded_at,
+    funding_rounds.funding_round_type,
+    funding_rounds.funding_round_code,
+    funding_rounds.raised_amount_usd,
+    funding_rounds.pre_money_valuation_usd,
+    funding_rounds.post_money_valuation_usd,
+    funding_rounds.participants,
+    funding_rounds.is_first_round,
+    funding_rounds.is_last_round
+   FROM funding_rounds
+  WHERE funding_rounds.funding_round_type = 'angel'
+
+-- create view "series_a" (all companies in series a round)
+
+CREATE VIEW public.series_a
+ AS
+ SELECT funding_rounds.id,
+    funding_rounds.funding_round_id,
+    funding_rounds.object_id,
+    funding_rounds.funded_at,
+    funding_rounds.funding_round_type,
+    funding_rounds.funding_round_code,
+    funding_rounds.raised_amount_usd,
+    funding_rounds.pre_money_valuation_usd,
+    funding_rounds.post_money_valuation_usd,
+    funding_rounds.participants,
+    funding_rounds.is_first_round,
+    funding_rounds.is_last_round
+   FROM funding_rounds
+  WHERE funding_rounds.funding_round_type = 'series-a'
+
+-- create view "stop_at_angel" (companies which did not advance from angel to series a)
+
+CREATE VIEW public.stop_at_angel
+ AS
+ SELECT an.id,
+    an.funding_round_id,
+    an.object_id,
+    an.funded_at,
+    an.funding_round_type,
+    an.raised_amount_usd,
+    an.pre_money_valuation_usd,
+    an.post_money_valuation_usd,
+    an.participants,
+    an.is_first_round,
+    an.is_last_round
+   FROM angel an
+     LEFT JOIN series_a a ON an.object_id = a.object_id
+  WHERE a.object_id IS NULL;
+
+
+-- create view "advance_to_series_a" (companies which succeeded in go to series A after angel)
+
+CREATE VIEW advance_to_series_a 
+AS
+	
+	SELECT 
+		an.funding_round_id,
+		an.object_id,
+		an.funded_at,
+		an.funding_round_type,
+		an.funding_round_code,
+		an.raised_amount_usd,
+		an.pre_money_valuation_usd,
+		an.post_money_valuation_usd
+	
+	FROM 
+		angel an
+	JOIN
+		series_a a
+	ON
+		an.object_id = a.object_id
+		
+	UNION
+	
+	SELECT 
+		a.funding_round_id,
+		a.object_id,
+		a.funded_at,
+		a.funding_round_type,
+		a.funding_round_code,
+		a.raised_amount_usd,
+		a.pre_money_valuation_usd,
+		a.post_money_valuation_usd
+	
+	FROM 
+		angel an
+	JOIN
+		series_a a
+	ON
+		an.object_id = a.object_id
+		 
+-- raised amount of each company in Angel rounds & whether it went to series a
+
+SELECT
+	an.object_id AS company_id,
+	SUM(an.raised_amount_usd) AS raised_amount_in_angel,
+	CASE WHEN a.object_id IS NOT NULL THEN 'yes' ELSE 'no' END AS making_to_series_a
+FROM
+	angel an
+	LEFT JOIN
+	series_a a
+	ON an.object_id = a.object_id
+GROUP BY
+	company_id,
+	making_to_series_a
+
+-- operating times of companies stopping at angel
+
+SELECT
+	sto.object_id AS company_id,
+	MAX(sto.funded_at) AS last_angel_at,
+	o.closed_at,
+	closed_at - MAX(sto.funded_at) AS operating_for
+
+FROM
+	stop_at_angel sto
+	JOIN
+	objects o
+	ON sto.object_id = o.id
+
+GROUP BY
+	sto.object_id,
+	o.closed_at
+
+-- operating times & time intervals between last angel and first series a of companies which went to series a
+
+SELECT
+	an.object_id AS company_id,
+	MAX(an.funded_at) AS last_angel_at,
+	o.closed_at,
+	MAX(an.funded_at) - o.closed_at AS operating_time_before_closed,
+	MIN(a.funded_at) AS first_series_a_at,
+	MIN(a.funded_at) - MAX(an.funded_at) AS times_from_angel_to_series_a
+
+FROM
+	angel an
+	JOIN
+	series_a a
+	ON 
+	an.object_id = a.object_id
+	JOIN
+	objects o
+	ON
+	o.id = an.object_id
+	
+GROUP BY
+	company_id,
+	closed_at
+	
+--  success rate to series a & median raised amount in angel by industry
+
+SELECT 
+	toa.category_code,
+	no_of_toA / total_in_angel AS percent_to_series_a,
+	median_raised_amount_angel
+
+FROM
+
+	(SELECT
+		category_code,
+		CAST(COUNT(DISTINCT an.object_id) AS decimal) AS no_of_toA
+	
+	FROM
+		objects o
+		JOIN
+		angel an
+		ON
+		o.id = an.object_id
+		JOIN
+		series_a a
+		ON
+		an.object_id = a.object_id
+		
+	GROUP BY category_code) toa
+
+	JOIN
+
+	(SELECT
+		category_code,
+		CAST(COUNT(DISTINCT an.object_id) AS decimal) AS total_in_angel,
+	 	PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY raised_amount_usd) AS median_raised_amount_angel
+	
+	FROM
+		objects o
+		JOIN
+		angel an
+		ON
+		o.id = an.object_id
+		
+		GROUP BY category_code) ang
+
+	ON
+	toa.category_code = ang.category_code
+
+
+GROUP BY
+	toa.category_code,
+	toa.no_of_toA,
+	ang.total_in_angel,
+	ang.median_raised_amount_angel
+
+-- average number of investors per angel round by company & its success status
+
+SELECT
+	company_id,
+	COUNT(DISTINCT an_i.funding_round_id) 		    AS angel_rounds_taken,
+	AVG(no_of_investors) 				                  AS avg_investors_per_round,
+	CASE
+		WHEN a.object_id IS NULL THEN 'no'
+		ELSE 'yes' END				                      AS making_to_series_a
+
+FROM
+
+		(SELECT
+			object_id AS company_id,
+			an.funding_round_id,
+			COUNT(DISTINCT investor_object_id) AS no_of_investors
+		FROM
+			angel an
+			JOIN
+			investments i
+			ON 
+			an.funding_round_id = i.funding_round_id
+		GROUP BY
+			company_id,
+			an.funding_round_id
+		) an_i
+	
+	LEFT JOIN
+		series_a a
+	ON
+		an_i.company_id = a.object_id
+
+GROUP BY
+	company_id,
+	a.object_id
+
+-- funded companies by angel investors
+
+SELECT 
+	o.name AS investor_name,
+	o.entity_type,
+	COUNT(DISTINCT funded_object_id) AS funded_companies_in_angel
+FROM
+	objects o
+	JOIN
+	investments i
+	ON o.id = i.investor_object_id
+	JOIN
+	funding_rounds fr
+	ON i.funding_round_id = fr.funding_round_id
+	WHERE funding_round_type = 'angel'
+
+GROUP BY
+	investor_name, entity_type
+
+
+
+-- companies go to A by angel investors
+
+SELECT
+	o.name AS angel_investor,
+	o.entity_type,
+	COUNT(DISTINCT object_id) AS companies_go_to_series_a
+	
+FROM
+	advance_to_series_a ad
+	JOIN
+	investments i
+	ON 
+	i.funding_round_id = ad.funding_round_id
+	JOIN
+	objects o
+	ON
+	i.investor_object_id = o.id
+	
+WHERE 
+	funding_round_type = 'angel'
+
+GROUP BY 
+	angel_investor,
+	entity_type
+
+-- % go to A by angel investor
+
+SELECT 
+	total.angel_investor,
+	total.entity_type,
+	total.last_investment_on,
+	total.funded_companies_in_angel,
+	total.funded_companies_in_angel / NULLIF(total.invest_year,0) AS avg_investments_per_year,
+	toa.companies_go_to_series_a,
+	companies_go_to_series_a/funded_companies_in_angel AS percent_go_to_a,
+	DENSE_RANK() OVER (ORDER BY companies_go_to_series_a/funded_companies_in_angel DESC) AS success_rate_rank 
+
+FROM
+
+	(SELECT 
+		o.name AS angel_investor,
+		o.entity_type,
+	 	MAX(an.funded_at) AS last_investment_on,
+	 	MIN(an.funded_at) AS first_investment_on,
+	 	CAST(DATE_PART('year',AGE(MAX(an.funded_at),MIN(an.funded_at))) AS decimal) AS invest_year,
+		CAST(COUNT(DISTINCT funded_object_id) AS decimal) AS funded_companies_in_angel
+	FROM
+		objects o
+		JOIN
+		investments i
+		ON o.id = i.investor_object_id
+		JOIN
+		angel an
+		ON i.funding_round_id = an.funding_round_id
+		
+	
+	GROUP BY
+		angel_investor, 
+		entity_type
+	) total
+
+JOIN
+
+	(SELECT
+		o.name AS angel_investor,
+		o.entity_type,
+		CAST(COUNT(DISTINCT object_id) AS decimal) AS companies_go_to_series_a
+		
+	FROM
+		advance_to_series_a ad
+		JOIN
+		investments i
+		ON 
+		i.funding_round_id = ad.funding_round_id
+		JOIN
+		objects o
+		ON
+		i.investor_object_id = o.id
+		
+	WHERE 
+		funding_round_type = 'angel'
+	
+	GROUP BY 
+		angel_investor,
+		entity_type
+	)	toa
+
+ON
+	total.angel_investor = toa.angel_investor
+
+WHERE
+	funded_companies_in_angel >= 10
+	AND
+	last_investment_on >= '2012-01-01'
+
+GROUP BY 
+	total.angel_investor,
+	total.entity_type,
+	total.last_investment_on,
+	total.invest_year,
+	total.funded_companies_in_angel,
+	toa.companies_go_to_series_a	
+
+-- no of companies having series a in each year
+
+SELECT
+	EXTRACT(YEAR FROM funded_at) AS year,
+	COUNT(DISTINCT object_id) AS companies_to_series_a
+FROM
+	advance_to_series_a
+WHERE 
+	funding_round_type = 'series-a'
+GROUP BY
+	EXTRACT(YEAR FROM funded_at)
+
+-- companies having series a each year & companies having angel in or before that year (running total)
+
+SELECT * FROM
+(SELECT
+	EXTRACT(YEAR FROM funded_at) AS year_of_series_a,
+	COUNT(DISTINCT object_id) AS companies_to_series_a
+FROM
+	advance_to_series_a
+WHERE 
+	funding_round_type = 'series-a'
+GROUP BY
+	EXTRACT(YEAR FROM funded_at)
+) sa
+	
+JOIN
+
+(
+SELECT
+	year_of_series_a,
+	COUNT(DISTINCT an.object_id) AS companies_with_angel_in_or_before	
+	
+FROM
+	(
+	SELECT
+		EXTRACT(YEAR FROM funded_at) AS year_of_series_a,
+		CAST(EXTRACT(YEAR FROM funded_at) || '-12-31' AS date) AS last_day_of_year,
+		COUNT(DISTINCT object_id) AS companies_to_series_a
+	FROM
+		advance_to_series_a
+	WHERE 
+		funding_round_type = 'series-a'
+	GROUP BY
+		EXTRACT(YEAR FROM funded_at),
+		CAST(EXTRACT(YEAR FROM funded_at) || '-12-31' AS date)
+	) yofa
+
+JOIN
+	angel an
+ON
+	an.funded_at <= yofa.last_day_of_year
+
+GROUP BY
+	year_of_series_a	
+) ang
+
+ON
+	sa.year_of_series_a = ang.year_of_series_a
+
+
+--- % to series A = (total companies in series a)/(total companies in angel) of each year
+
+SELECT
+	year_of_series_a,
+	companies_to_series_a,
+	CAST(COUNT(DISTINCT object_id) AS decimal) AS angel_companies_in_year,
+	companies_to_series_a / CAST(COUNT(DISTINCT object_id) AS decimal) AS percent_to_series_a
+FROM	
+	(SELECT
+		EXTRACT(YEAR FROM funded_at) AS year_of_series_a,
+	 	CAST(EXTRACT(YEAR FROM funded_at) || '-01-01' AS date) AS first_day_of_year,
+	 	CAST(EXTRACT(YEAR FROM funded_at) || '-12-31' AS date) AS last_day_of_year,
+		CAST(COUNT(DISTINCT object_id) AS decimal) AS companies_to_series_a
+	FROM
+		advance_to_series_a
+	WHERE 
+		funding_round_type = 'series-a'
+	GROUP BY
+		EXTRACT(YEAR FROM funded_at),
+	 	CAST(EXTRACT(YEAR FROM funded_at) || '-01-01' AS date),
+	 	CAST(EXTRACT(YEAR FROM funded_at) || '-12-31' AS date) 
+	) sa
+	
+	JOIN
+		angel an
+	ON
+		an.funded_at >= first_day_of_year
+		AND
+		an.funded_at <= last_day_of_year
+GROUP BY
+	year_of_series_a,
+	companies_to_series_a
+  
+  
